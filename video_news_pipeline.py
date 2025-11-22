@@ -86,9 +86,6 @@ VOICE_VOLUME = float(os.getenv("VOICE_VOLUME", "1.0"))
 
 DEBUG = "--debug" in sys.argv
 
-RED_COLOR = (0xD5, 0x00, 0x32)  # #d50032
-
-
 def log(msg: str):
     print(msg)
     sys.stdout.flush()
@@ -371,7 +368,10 @@ def make_vertical_canvas(clip, target_w=1080, target_h=1920, bg_color=(20, 20, 2
           .set_duration(clip.duration) \
           .set_fps(clip.fps))
 
-    return CompositeVideoClip([bg, scaled.set_position((x_pos, y_pos))], size=(target_w, target_h))
+    return CompositeVideoClip(
+        [bg, scaled.set_position((x_pos, y_pos))],
+        size=(target_w, target_h)
+    ).set_duration(clip.duration).set_fps(clip.fps or 30)
 
 def create_overlay_shape(target_w=1080, target_h=1920, shape_opacity=200, color=(220, 20, 20), R=60):
     """Crea una forma poligonal con curvas, del tamaño adecuado para reels verticales."""
@@ -400,8 +400,7 @@ def create_overlay_shape(target_w=1080, target_h=1920, shape_opacity=200, color=
 
     # Añadir esquinas redondeadas según el mejor método que logramos
     rounded = img.filter(ImageFilter.GaussianBlur(3))
-
-    return ImageClip(np.array(rounded), duration=5).set_position("center")
+    return ImageClip(np.array(rounded))
 
 
 def build_video_with_overlays(
@@ -460,7 +459,7 @@ def build_video_with_overlays(
         shape_opacity=200,
         color=(220, 20, 20),
         R=60
-    ).set_duration(final_duration)
+    ).set_duration(final_duration).set_position(("center", "center"))
 
     # Texto dentro del cuadro rojo
     text_clip = create_pil_text_clip(
@@ -475,10 +474,9 @@ def build_video_with_overlays(
 
     # Composición final
     final = CompositeVideoClip(
-        [video_loop, red_box, text_clip],
+        [video_loop, overlay, text_clip],
         size=video_loop.size,
-    ).set_duration(final_duration)
-
+    )
     final = final.set_audio(final_audio)
 
     if DEBUG:
@@ -500,11 +498,11 @@ def build_video_with_overlays(
     )
 
     final.close()
+    video_loop.close()
     video.close()
     voice.close()
-    music.close()
-    video_loop.close()
     music_loop.close()
+    music.close()
 
 
 # ---------------- GOOGLE DRIVE ---------------- #
@@ -767,7 +765,7 @@ def main():
         )
 
         print("DEBUG: Me detengo aquí, no subo a Drive.")
-        print("Ruta del video:", final_video_path)
+        print("Ruta del video:", output_video_path)
 
         return   # ⬅️ DETIENE EL PROGRAMA COMPLETO
 
@@ -806,7 +804,7 @@ def main():
         # Limpieza de temporales
         if DEBUG:
             log(f"Limpiando temporales en {tmp_dir}")
-        print("DEBUG: No se borró la carpeta temporal:", tmp_dir)
+            print("DEBUG: No se borró la carpeta temporal:", tmp_dir)
         # shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
