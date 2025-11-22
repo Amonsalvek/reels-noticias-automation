@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.mp4
+*.mp3
+*.mov
+*.wav
+*.otf
+*.ttf
+*.log
+*.tmp
+*.cache
+*.DS_Store
+.env
+video_news_*/
