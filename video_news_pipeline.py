@@ -47,7 +47,7 @@ from moviepy.editor import (
 import moviepy.video.fx.all as vfx
 import moviepy.audio.fx.all as afx
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 
 from google.oauth2 import service_account
@@ -806,7 +806,7 @@ def main():
         # Limpieza de temporales
         if DEBUG:
             log(f"Limpiando temporales en {tmp_dir}")
-        print("DEBUG: No se borró la carpeta temporal:", tmpdir)
+        print("DEBUG: No se borró la carpeta temporal:", tmp_dir)
         # shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
