@@ -355,6 +355,54 @@ def convert_to_reel_format(clip: VideoFileClip, target_w=720, target_h=1280) -> 
         clip = clip.crop(x1=x1, x2=x2, y1=0, y2=target_h)
     return clip
 
+def make_vertical_canvas(clip, target_w=1080, target_h=1920, bg_color=(20, 20, 20)):
+    """Convierte un video horizontal en un canvas vertical centrado."""
+
+    # Escala el video para que su altura llene el canvas vertical
+    scale_factor = target_h / clip.h
+    scaled = clip.resize(scale_factor)
+
+    # Centrar horizontalmente
+    x_pos = (target_w - scaled.w) // 2
+    y_pos = 0  # llena en alto
+
+    # Crear fondo negro (o color)
+    bg = (ImageClip(np.zeros((target_h, target_w, 3), dtype=np.uint8)) \
+          .set_duration(clip.duration) \
+          .set_fps(clip.fps))
+
+    return CompositeVideoClip([bg, scaled.set_position((x_pos, y_pos))], size=(target_w, target_h))
+
+def create_overlay_shape(target_w=1080, target_h=1920, shape_opacity=200, color=(220, 20, 20), R=60):
+    """Crea una forma poligonal con curvas, del tamaño adecuado para reels verticales."""
+    W = target_w
+    H = target_h
+
+    # 80% del alto total
+    H_shape = int(H * 0.80)
+
+    # Ancho completo
+    W_shape = W
+
+    img = Image.new("RGBA", (W_shape, H_shape), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Puntos del polígono (mejorados)
+    p1 = (int(W*0.35), 0)
+    p2 = (W, 0)
+    p3 = (W, int(H_shape*0.55))
+    p4 = (int(W*0.70), H_shape)
+    p5 = (0, H_shape)
+    p6 = (0, int(H_shape*0.25))
+
+    polygon = [p1, p2, p3, p4, p5, p6]
+    draw.polygon(polygon, fill=(color[0], color[1], color[2], shape_opacity))
+
+    # Añadir esquinas redondeadas según el mejor método que logramos
+    rounded = img.filter(ImageFilter.GaussianBlur(3))
+
+    return ImageClip(np.array(rounded), duration=5).set_position("center")
+
 
 def build_video_with_overlays(
     background_video_path: Path,
@@ -376,7 +424,7 @@ def build_video_with_overlays(
 
     # Video base (sin audio)
     video = VideoFileClip(str(background_video_path)).without_audio()
-    video = convert_to_reel_format(video, target_w=720, target_h=1280)
+    video = make_vertical_canvas(video, target_w=1080, target_h=1920)
 
     # Audio TTS (voz principal)
     voice = AudioFileClip(str(tts_audio_path)).volumex(VOICE_VOLUME)
@@ -406,13 +454,13 @@ def build_video_with_overlays(
     final_audio = CompositeAudioClip([music_loop, voice])
 
     # Cuadro rojo (fijo al centro)
-    box_w = int(video_loop.w * 0.85)
-    box_h = int(video_loop.h * 0.3)
-    red_box = (
-        ColorClip(size=(box_w, box_h), color=RED_COLOR)
-        .set_duration(final_duration)
-        .set_position(("center", "center"))
-    )
+    overlay = create_overlay_shape(
+        target_w=1080,
+        target_h=1920,
+        shape_opacity=200,
+        color=(220, 20, 20),
+        R=60
+    ).set_duration(final_duration)
 
     # Texto dentro del cuadro rojo
     text_clip = create_pil_text_clip(
@@ -420,7 +468,7 @@ def build_video_with_overlays(
         font_path=str(font_path),
         fontsize=70,
         color="white",
-        max_width=int(box_w * 0.9),
+        max_width=int(1080 * 0.85),
         duration=final_duration,
         position=("center", "center"),
     )
