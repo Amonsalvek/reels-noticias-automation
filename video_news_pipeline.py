@@ -63,8 +63,8 @@ STATE_FILE = BASE_DIR / "news_state.json"
 
 # RSS Chile (Google News)
 GOOGLE_NEWS_RSS_URLS = [
-    "https://news.google.com/rss/search?q=transporte+de+carga&hl=es-419&gl=CL&ceid=CL:es-419",
-    "https://news.google.com/rss/search?q=camiones&hl=es-419&gl=CL&ceid=CL:es-419",
+    "https://news.google.com/rss/search?q=transporte%20de%20carga%20chile&hl=es-419&gl=CL&ceid=CL:es-419",
+    "https://news.google.com/rss/search?q=camiones%20chile&hl=es-419&gl=CL&ceid=CL:es-419",
 ]
 
 # Cargar .env
@@ -144,6 +144,15 @@ def extract_clean_title_and_source(raw_title: str):
         clean_title = raw_title
     return clean_title, source
 
+CHILE_DOMAINS = [
+    ".cl", "biobiochile", "latercera", "emol", "t13", "cooperativa",
+    "adnradio", "df.cl", "megadiario", "canal13", "chvnoticias",
+    "24horas", "radioagricultura"
+]
+
+def is_chilean_domain(url: str) -> bool:
+    url = url.lower()
+    return any(domain in url for domain in CHILE_DOMAINS)
 
 def get_openai_client() -> OpenAI:
     if not OPENAI_API_KEY:
@@ -272,6 +281,50 @@ def generate_tts_audio(client: OpenAI, script_text: str, output_path: Path):
 
 
 # ---------------- PIL: TEXTO COMO IMAGECLIP ---------------- #
+
+def create_title_clip(
+    text: str,
+    font_path: str,
+    fontsize: int,
+    color: str,
+    underline_color: str,
+    duration: float,
+    width: int = 1080,
+    position=("center", 150),
+):
+    font = ImageFont.truetype(font_path, fontsize)
+
+    # Medir
+    temp = Image.new("RGB", (100, 100))
+    d = ImageDraw.Draw(temp)
+    bbox = d.textbbox((0,0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    padding = 30
+    underline_height = 8   # grosor de la línea
+
+    img_w = width
+    img_h = text_h + padding + underline_height + 20
+
+    img = Image.new("RGBA", (img_w, img_h), (0,0,0,0))
+    draw = ImageDraw.Draw(img)
+
+    # Posición del texto centrado
+    x = (img_w - text_w) // 2
+    y = 0
+    draw.text((x, y), text, font=font, fill=color)
+
+    # Línea subrayada
+    underline_y = text_h + padding
+    draw.rectangle(
+        [(x, underline_y), (x + text_w, underline_y + underline_height)],
+        fill=underline_color
+    )
+
+    clip = ImageClip(np.array(img)).set_duration(duration).set_position(position)
+    return clip
+
 
 def create_pil_text_clip(
     text: str,
@@ -698,6 +751,8 @@ def main():
         raw_title = entry.title
         clean_title, source = extract_clean_title_and_source(raw_title)
         entry_url = entry.link
+        if not is_chilean_domain(entry_url):
+            continue
         final_url_candidate = get_final_url(entry_url)
         h = hash_news_content(clean_title, source, final_url_candidate)
         if h not in seen_hashes:
