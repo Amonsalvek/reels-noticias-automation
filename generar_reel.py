@@ -52,6 +52,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 BACKGROUND_VIDEO_URL = os.getenv("BACKGROUND_VIDEO_URL", "")
 BACKGROUND_MUSIC_URL = os.getenv("BACKGROUND_MUSIC_URL", "")
 FONT_URL = os.getenv("FONT_URL", "")
+LOGO_PATH = os.getenv("LOGO_PATH", "")  # Path to logo image file
 
 MUSIC_VOLUME = float(os.getenv("MUSIC_VOLUME", "0.4"))
 VOICE_VOLUME = float(os.getenv("VOICE_VOLUME", "1.0"))
@@ -303,6 +304,7 @@ def build_video_with_overlays(
     title_text: str,
     tts_audio_path: Path,
     output_path: Path,
+    logo_path: Path = None,
 ):
 
     video = VideoFileClip(str(background_video_path)).without_audio()
@@ -324,17 +326,63 @@ def build_video_with_overlays(
     text_clip = create_pil_text_clip(
         text=title_text,
         font_path=str(font_path),
-        fontsize=70,
+        fontsize=80,
         color="white",
         max_width=int(1080 * 0.85),
         duration=final_duration,
         position=("center", "center"),
     )
 
+    # Título fijo superior "NOTICIA"
+    noticia_clip = create_pil_text_clip(
+        text="NOTICIA",
+        font_path=str(font_path),
+        fontsize=70,
+        color="white",
+        max_width=int(1080 * 0.9),
+        duration=final_duration,
+        position=("center", 120),  # parte superior central
+    )
+
+    # Logo y branding abajo a la izquierda
+    clips_to_composite = [video_loop, overlay, noticia_clip, text_clip]
+    
+    if logo_path and logo_path.exists():
+        # Load and resize logo
+        logo_img = Image.open(str(logo_path))
+        # Resize logo to appropriate size (e.g., 120px height)
+        logo_height = 120
+        aspect_ratio = logo_img.width / logo_img.height
+        logo_width = int(logo_height * aspect_ratio)
+        logo_img = logo_img.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
+        
+        logo_y = 1920 - logo_height - 50
+        logo_clip = ImageClip(np.array(logo_img), ismask=False) \
+            .set_duration(final_duration) \
+            .set_position((50, logo_y))
+        
+        clips_to_composite.append(logo_clip)
+        
+        # Create branding text clip
+        branding_text = create_pil_text_clip(
+            text="ChileTransportistas.com",
+            font_path=str(font_path),
+            fontsize=40,
+            color="white",
+            max_width=600,
+            duration=final_duration,
+            position=(50 + logo_width + 20, 0),  # Will adjust after getting text height
+        )
+        # Center text vertically with logo
+        text_height = branding_text.h
+        text_y = logo_y + (logo_height - text_height) // 2
+        branding_text = branding_text.set_position((50 + logo_width + 20, text_y))
+        clips_to_composite.append(branding_text)
+
     final_audio = CompositeAudioClip([music_loop, voice])
 
     final = CompositeVideoClip(
-        [video_loop, overlay, text_clip],
+        clips_to_composite,
         size=video_loop.size
     ).set_audio(final_audio)
 
@@ -422,6 +470,20 @@ def main():
         # ------- generar video -------
         output_video = tmp_dir / f"{video_id}.mp4"
 
+        # Logo path (can be from env var or local file)
+        logo_path = None
+        if LOGO_PATH:
+            logo_path = Path(LOGO_PATH) if Path(LOGO_PATH).exists() else None
+        # Also check for a local logo file in the script directory
+        if not logo_path:
+            local_logo = BASE_DIR / "logo.png"
+            if local_logo.exists():
+                logo_path = local_logo
+            else:
+                local_logo = BASE_DIR / "logo.jpg"
+                if local_logo.exists():
+                    logo_path = local_logo
+
         build_video_with_overlays(
             background_video_path=bg_video_path,
             background_music_path=bg_music_path,
@@ -429,6 +491,7 @@ def main():
             title_text=news_title,
             tts_audio_path=tts_path,
             output_path=output_video,
+            logo_path=logo_path,
         )
 
         print("\n✔ VIDEO GENERADO:")
