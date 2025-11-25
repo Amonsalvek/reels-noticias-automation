@@ -378,7 +378,7 @@ ScriptType: v4.00+
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,4,3,8,2,10,10,30,1
+Style: Default,Arial,28,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,4,2,6,2,10,10,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -423,12 +423,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             text = ' '.join(words[:mid]) + '\\N' + ' '.join(words[mid:])
         
         # Crear evento ASS con caja semitransparente
-        # Usamos \pos para centrar en la mitad superior (y=480 es el centro de la mitad superior de 960px)
+        # Posicionado en la mitad superior, cerca de la línea divisoria (y=900, justo arriba de la línea en y=960)
         # \an5 para anclaje central, \3c para color de borde, \4c para color de fondo de caja
-        # \4a&HB0& para transparencia del fondo (~30% opacidad, más transparente)
-        # \bord3 para borde, \shad8 para sombra que actúa como fondo de caja
+        # \4a&HB0& para transparencia del fondo (~30% opacidad)
+        # \bord2 para borde más delgado, \shad6 para sombra que actúa como fondo de caja
         # BorderStyle=4 en el estilo crea una caja de fondo
-        ass_text = f"{{\\an5\\pos(540,480)\\3c&H000000&\\4c&H000000&\\4a&HB0&\\bord3\\shad8\\fad(200,200)}}{text}"
+        ass_text = f"{{\\an5\\pos(540,900)\\3c&H000000&\\4c&H000000&\\4a&HB0&\\bord2\\shad6\\fad(200,200)}}{text}"
         
         ass_events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{ass_text}")
     
@@ -499,9 +499,11 @@ def build_video_with_overlays(
         .set_position((0, 960)) \
         .set_fps(video.fps or 30)
 
-    # Overlay y título en la mitad inferior (centrados verticalmente en la mitad inferior)
-    # La mitad inferior va de y=960 a y=1920, así que el centro está en y=1440
-    overlay = create_overlay_shape().set_duration(final_duration).set_position(("center", 1440))
+    # Overlay y título en la mitad inferior, justo debajo de la línea divisoria
+    # La línea divisoria está en y=960, así que colocamos el overlay y título más arriba
+    # Margen de 40px debajo de la línea divisoria
+    overlay_y = 1000  # 960 (línea) + 40 (margen)
+    overlay = create_overlay_shape().set_duration(final_duration).set_position(("center", overlay_y))
 
     text_clip = create_pil_text_clip(
         text=title_text,
@@ -510,7 +512,7 @@ def build_video_with_overlays(
         color="white",
         max_width=int(1080 * 0.85),
         duration=final_duration,
-        position=("center", 1440),  # centro de la mitad inferior
+        position=("center", overlay_y),  # justo debajo de la línea divisoria
     )
 
     # Línea divisoria horizontal en el medio
