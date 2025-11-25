@@ -22,6 +22,7 @@ import sys
 import re
 import tempfile
 import gc
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -297,6 +298,174 @@ def make_vertical_canvas(clip, target_w=1080, target_h=1920):
     ).set_duration(clip.duration).set_fps(clip.fps or 30)
 
 
+def create_divider_line(target_w=1080, target_h=1920, line_height=2, color="#333333", duration=1.0):
+    """Crea un clip de línea divisoria horizontal en el medio del video."""
+    img = Image.new("RGB", (target_w, line_height), color)
+    line_clip = ImageClip(np.array(img), ismask=False) \
+        .set_duration(duration) \
+        .set_position(("center", target_h // 2 - line_height // 2))
+    return line_clip
+
+
+def generate_srt_from_script(script_text: str, audio_duration: float, output_srt_path: Path):
+    """
+    Genera un archivo SRT básico desde el script.
+    Divide el texto en segmentos temporales aproximados basados en la duración del audio.
+    Usa una estimación de velocidad de lectura (palabras por segundo).
+    """
+    # Dividir el script en frases (por puntos, signos de exclamación, etc.)
+    sentences = re.split(r'[.!?]+', script_text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if not sentences:
+        # Si no hay frases, usar el texto completo
+        sentences = [script_text]
+    
+    # Calcular palabras totales
+    total_words = len(script_text.split())
+    words_per_second = total_words / audio_duration if audio_duration > 0 else 3.0
+    
+    srt_content = []
+    current_time = 0.0
+    
+    for i, sentence in enumerate(sentences):
+        if not sentence:
+            continue
+            
+        # Calcular duración basada en palabras
+        sentence_words = len(sentence.split())
+        sentence_duration = sentence_words / words_per_second if words_per_second > 0 else 2.0
+        sentence_duration = max(1.0, min(sentence_duration, 5.0))  # Entre 1 y 5 segundos
+        
+        start_time = current_time
+        end_time = min(current_time + sentence_duration, audio_duration)
+        
+        # Formatear tiempos SRT (HH:MM:SS,mmm)
+        def format_srt_time(seconds):
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            secs = int(seconds % 60)
+            millis = int((seconds % 1) * 1000)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+        
+        srt_content.append(f"{i + 1}")
+        srt_content.append(f"{format_srt_time(start_time)} --> {format_srt_time(end_time)}")
+        srt_content.append(sentence)
+        srt_content.append("")
+        
+        current_time = end_time
+        if current_time >= audio_duration:
+            break
+    
+    output_srt_path.write_text("\n".join(srt_content), encoding="utf-8")
+
+
+def convert_srt_to_ass(srt_path: Path, ass_path: Path, font_path: Path, video_width=1080, video_height=1920):
+    """
+    Convierte un archivo SRT a ASS con estilo:
+    - Caja semitransparente
+    - Máximo 2 líneas
+    - Posicionado en la mitad superior
+    """
+    srt_content = srt_path.read_text(encoding="utf-8")
+    
+    # Parsear SRT básico
+    subtitle_blocks = re.split(r'\n\s*\n', srt_content.strip())
+    
+    ass_header = f"""[Script Info]
+Title: Subtítulos
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,4,3,8,2,10,10,30,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    
+    ass_events = []
+    
+    for block in subtitle_blocks:
+        if not block.strip():
+            continue
+        
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        
+        # Extraer tiempo (línea 2)
+        time_line = lines[1]
+        time_match = re.match(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})', time_line)
+        if not time_match:
+            continue
+        
+        # Convertir tiempo a formato ASS (H:MM:SS.cc)
+        def srt_to_ass_time(h, m, s, ms):
+            total_seconds = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            secs = total_seconds % 60
+            return f"{hours}:{minutes:02d}:{secs:05.2f}"
+        
+        start_time = srt_to_ass_time(time_match.group(1), time_match.group(2), time_match.group(3), time_match.group(4))
+        end_time = srt_to_ass_time(time_match.group(5), time_match.group(6), time_match.group(7), time_match.group(8))
+        
+        # Texto (líneas 3+)
+        text = ' '.join(lines[2:])
+        # Limpiar HTML si existe
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Dividir en máximo 2 líneas
+        words = text.split()
+        if len(words) > 20:  # Aproximadamente 2 líneas
+            mid = len(words) // 2
+            text = ' '.join(words[:mid]) + '\\N' + ' '.join(words[mid:])
+        
+        # Crear evento ASS con caja semitransparente
+        # Usamos \pos para centrar en la mitad superior (y=480 es el centro de la mitad superior de 960px)
+        # \an5 para anclaje central, \3c para color de borde, \4c para color de fondo de caja
+        # \4a&HB0& para transparencia del fondo (~30% opacidad, más transparente)
+        # \bord3 para borde, \shad8 para sombra que actúa como fondo de caja
+        # BorderStyle=4 en el estilo crea una caja de fondo
+        ass_text = f"{{\\an5\\pos(540,480)\\3c&H000000&\\4c&H000000&\\4a&HB0&\\bord3\\shad8\\fad(200,200)}}{text}"
+        
+        ass_events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{ass_text}")
+    
+    ass_content = ass_header + "\n".join(ass_events)
+    ass_path.write_text(ass_content, encoding="utf-8")
+
+
+def burn_subtitles_with_ffmpeg(video_path: Path, ass_path: Path, output_path: Path):
+    """
+    Quema los subtítulos ASS en el video usando FFmpeg.
+    """
+    # Escapar rutas para Windows
+    video_str = str(video_path).replace('\\', '/')
+    ass_str = str(ass_path).replace('\\', '/')
+    output_str = str(output_path).replace('\\', '/')
+    
+    cmd = [
+        "ffmpeg",
+        "-i", video_str,
+        "-vf", f"ass={ass_str}",
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        "-preset", "ultrafast",
+        "-y",
+        output_str
+    ]
+    
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        log(f"Subtítulos quemados exitosamente")
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if isinstance(e.stderr, str) else e.stderr.decode('utf-8', errors='ignore')
+        raise RuntimeError(f"Error al quemar subtítulos con FFmpeg: {error_msg}")
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg no encontrado. Asegúrate de que FFmpeg esté instalado y en el PATH.")
+
+
 def build_video_with_overlays(
     background_video_path: Path,
     background_music_path: Path,
@@ -305,6 +474,7 @@ def build_video_with_overlays(
     tts_audio_path: Path,
     output_path: Path,
     logo_path: Path = None,
+    script_text: str = None,
 ):
 
     video = VideoFileClip(str(background_video_path)).without_audio()
@@ -319,9 +489,19 @@ def build_video_with_overlays(
     voice = voice.set_duration(final_duration)
     music_loop = afx.audio_loop(music, duration=final_duration).audio_fadeout(0.4)
 
-    video_loop = video.fx(vfx.loop, duration=final_duration)
+    # Crop video a la mitad superior (0 a 960)
+    video_cropped = video.crop(y1=0, y2=960).set_position((0, 0))
+    video_loop = video_cropped.fx(vfx.loop, duration=final_duration)
 
-    overlay = create_overlay_shape().set_duration(final_duration).set_position(("center", "center"))
+    # Crear fondo negro para la mitad inferior
+    lower_bg = ImageClip(np.zeros((960, 1080, 3), dtype=np.uint8)) \
+        .set_duration(final_duration) \
+        .set_position((0, 960)) \
+        .set_fps(video.fps or 30)
+
+    # Overlay y título en la mitad inferior (centrados verticalmente en la mitad inferior)
+    # La mitad inferior va de y=960 a y=1920, así que el centro está en y=1440
+    overlay = create_overlay_shape().set_duration(final_duration).set_position(("center", 1440))
 
     text_clip = create_pil_text_clip(
         text=title_text,
@@ -330,66 +510,82 @@ def build_video_with_overlays(
         color="white",
         max_width=int(1080 * 0.85),
         duration=final_duration,
-        position=("center", "center"),
+        position=("center", 1440),  # centro de la mitad inferior
     )
 
-    # Título fijo superior "NOTICIA"
-    noticia_clip = create_pil_text_clip(
-        text="NOTICIA",
-        font_path=str(font_path),
-        fontsize=70,
-        color="white",
-        max_width=int(1080 * 0.9),
-        duration=final_duration,
-        position=("center", 120),  # parte superior central
+    # Línea divisoria horizontal en el medio
+    divider_line = create_divider_line(
+        target_w=1080,
+        target_h=1920,
+        line_height=2,
+        color="#333333",
+        duration=final_duration
     )
 
-    # Logo y branding abajo a la izquierda
-    clips_to_composite = [video_loop, overlay, noticia_clip, text_clip]
-    
+    clips_to_composite = [video_loop, lower_bg, divider_line, overlay, text_clip]
+
+    # Coordenadas base para zona de branding (en la mitad inferior)
+    base_x = 50
+    base_y = 1920 - 120 - 50  # asumimos altura de logo ~120
+
+    logo_width = 0
+    logo_height = 0
+
+    # Logo (si existe)
     if logo_path and logo_path.exists():
-        # Load and resize logo
         logo_img = Image.open(str(logo_path))
-        # Resize logo to appropriate size (e.g., 120px height)
         logo_height = 120
         aspect_ratio = logo_img.width / logo_img.height
         logo_width = int(logo_height * aspect_ratio)
         logo_img = logo_img.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
-        
-        logo_y = 1920 - logo_height - 50
-        logo_clip = ImageClip(np.array(logo_img), ismask=False) \
-            .set_duration(final_duration) \
-            .set_position((50, logo_y))
-        
-        clips_to_composite.append(logo_clip)
-        
-        # Create branding text clip
-        branding_text = create_pil_text_clip(
-            text="ChileTransportistas.com",
-            font_path=str(font_path),
-            fontsize=40,
-            color="white",
-            max_width=600,
-            duration=final_duration,
-            position=(50 + logo_width + 20, 0),  # Will adjust after getting text height
+
+        logo_clip = (
+            ImageClip(np.array(logo_img), ismask=False)
+            .set_duration(final_duration)
+            .set_position((base_x, base_y))
         )
-        # Center text vertically with logo
-        text_height = branding_text.h
-        text_y = logo_y + (logo_height - text_height) // 2
-        branding_text = branding_text.set_position((50 + logo_width + 20, text_y))
-        clips_to_composite.append(branding_text)
+        clips_to_composite.append(logo_clip)
+    else:
+        # Si no hay logo, dejamos un ancho mínimo de referencia para no pegar el texto al borde
+        logo_width = 0
+        logo_height = 0
+
+    # Texto de branding SIEMPRE (aunque no haya logo)
+    branding_x = base_x + (logo_width + 20 if logo_width > 0 else 0)
+
+    branding_text = create_pil_text_clip(
+        text="ChileTransportistas.com",
+        font_path=str(font_path),
+        fontsize=40,
+        color="white",
+        max_width=600,
+        duration=final_duration,
+        position=(branding_x, 0),  # luego corregimos Y
+    )
+    text_height = branding_text.h or 60  # fallback por si acaso
+    # centrar verticalmente respecto al logo si existe; si no, usar base_y
+    if logo_height > 0:
+        text_y = base_y + (logo_height - text_height) // 2
+    else:
+        text_y = base_y + (120 - text_height) // 2
+
+    branding_text = branding_text.set_position((branding_x, text_y))
+    clips_to_composite.append(branding_text)
 
     final_audio = CompositeAudioClip([music_loop, voice])
 
     final = CompositeVideoClip(
         clips_to_composite,
-        size=video_loop.size
+        size=(1080, 1920)
     ).set_audio(final_audio)
 
     gc.collect()
 
+    # Guardar video temporal antes de quemar subtítulos
+    temp_video_path = output_path.parent / f"temp_{output_path.name}"
+    
     final.write_videofile(
-        str(output_path),
+        str(temp_video_path),
         fps=24,
         codec="libx264",
         audio_codec="aac",
@@ -404,6 +600,33 @@ def build_video_with_overlays(
     voice.close()
     music_loop.close()
     music.close()
+
+    # Si hay script_text, generar y quemar subtítulos
+    if script_text:
+        try:
+            srt_path = output_path.parent / f"{output_path.stem}.srt"
+            ass_path = output_path.parent / f"{output_path.stem}.ass"
+            
+            generate_srt_from_script(script_text, final_duration, srt_path)
+            convert_srt_to_ass(srt_path, ass_path, font_path)
+            burn_subtitles_with_ffmpeg(temp_video_path, ass_path, output_path)
+            
+            # Limpiar archivos temporales
+            if temp_video_path.exists():
+                temp_video_path.unlink()
+            if srt_path.exists():
+                srt_path.unlink()
+            if ass_path.exists():
+                ass_path.unlink()
+        except Exception as e:
+            log(f"[WARN] Error al generar subtítulos: {e}")
+            # Si falla, usar el video sin subtítulos
+            if temp_video_path.exists():
+                temp_video_path.rename(output_path)
+    else:
+        # Si no hay script, renombrar el temporal al final
+        if temp_video_path.exists():
+            temp_video_path.rename(output_path)
 
 
 # =========================================================
@@ -452,9 +675,6 @@ def main():
         bg_music_path = tmp_dir / "music.mp3"
         font_path = tmp_dir / "font.otf"
 
-        download = lambda url, dest: requests.get(url, timeout=30).raise_for_status()
-        requests.get
-
         r = requests.get(BACKGROUND_VIDEO_URL, stream=True)
         with open(bg_video_path, "wb") as f:
             for chunk in r.iter_content(8192): f.write(chunk)
@@ -473,16 +693,26 @@ def main():
         # Logo path (can be from env var or local file)
         logo_path = None
         if LOGO_PATH:
-            logo_path = Path(LOGO_PATH) if Path(LOGO_PATH).exists() else None
-        # Also check for a local logo file in the script directory
-        if not logo_path:
-            local_logo = BASE_DIR / "logo.png"
-            if local_logo.exists():
-                logo_path = local_logo
+            candidate = Path(LOGO_PATH)
+            # Si es relativo, asumir que está en BASE_DIR
+            if not candidate.is_absolute():
+                candidate = BASE_DIR / candidate
+            if candidate.exists():
+                logo_path = candidate
             else:
-                local_logo = BASE_DIR / "logo.jpg"
-                if local_logo.exists():
-                    logo_path = local_logo
+                log(f"[WARN] Logo no encontrado en ruta: {candidate}")
+
+        # También revisar archivos locales por defecto en el directorio del script
+        if not logo_path:
+            for name in ["logo.png", "logo.jpg"]:
+                candidate = BASE_DIR / name
+                if candidate.exists():
+                    logo_path = candidate
+                    log(f"[INFO] Usando logo por defecto: {candidate}")
+                    break
+
+        if not logo_path:
+            log("[WARN] No se encontró ningún archivo de logo. Se mostrará solo el texto de marca.")
 
         build_video_with_overlays(
             background_video_path=bg_video_path,
@@ -492,6 +722,7 @@ def main():
             tts_audio_path=tts_path,
             output_path=output_video,
             logo_path=logo_path,
+            script_text=script_text,
         )
 
         print("\n✔ VIDEO GENERADO:")
