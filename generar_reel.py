@@ -35,7 +35,8 @@ from moviepy.editor import (
     AudioFileClip,
     CompositeAudioClip,
     CompositeVideoClip,
-    ImageClip
+    ImageClip,
+    concatenate_videoclips
 )
 import moviepy.video.fx.all as vfx
 import moviepy.audio.fx.all as afx
@@ -372,13 +373,34 @@ def convert_srt_to_ass(srt_path: Path, ass_path: Path, font_path: Path, video_wi
     # Parsear SRT básico
     subtitle_blocks = re.split(r'\n\s*\n', srt_content.strip())
     
+    # Obtener nombre de fuente del archivo (opcional, usar Arial como fallback)
+    font_name = "Arial"
+    try:
+        if font_path.exists():
+            try:
+                from fontTools.ttLib import TTFont
+                font = TTFont(str(font_path))
+                font_name = font['name'].getDebugName(4) or "Arial"
+            except ImportError:
+                # fontTools no está instalado, usar Arial
+                pass
+            except Exception:
+                # Error al leer la fuente, usar Arial
+                pass
+    except Exception:
+        pass
+    
+    # Estilo ASS: texto blanco, borde negro, caja semitransparente
+    # BorderStyle=3 = caja de fondo, Outline=4 = borde grueso, Shadow=0 = sin sombra
+    # PrimaryColour=&H00FFFFFF = blanco (BGR), OutlineColour=&H00000000 = negro (BGR)
+    # BackColour=&H80000000 = negro semitransparente para la caja
     ass_header = f"""[Script Info]
 Title: Subtítulos
 ScriptType: v4.00+
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,28,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,4,2,6,2,10,10,30,1
+Style: Default,{font_name},52,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,3,4,0,2,10,10,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -401,11 +423,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         
         # Convertir tiempo a formato ASS (H:MM:SS.cc)
+        # Formato ASS: H:MM:SS.cc (centésimas de segundo, no milisegundos)
         def srt_to_ass_time(h, m, s, ms):
             total_seconds = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
             hours = int(total_seconds // 3600)
             minutes = int((total_seconds % 3600) // 60)
             secs = total_seconds % 60
+            # Formato: H:MM:SS.cc (2 decimales para centésimas)
             return f"{hours}:{minutes:02d}:{secs:05.2f}"
         
         start_time = srt_to_ass_time(time_match.group(1), time_match.group(2), time_match.group(3), time_match.group(4))
@@ -418,17 +442,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         
         # Dividir en máximo 2 líneas
         words = text.split()
-        if len(words) > 20:  # Aproximadamente 2 líneas
+        if len(words) > 18:  # Aproximadamente 2 líneas
             mid = len(words) // 2
             text = ' '.join(words[:mid]) + '\\N' + ' '.join(words[mid:])
         
         # Crear evento ASS con caja semitransparente
-        # Posicionado en la mitad superior, cerca de la línea divisoria (y=900, justo arriba de la línea en y=960)
-        # \an5 para anclaje central, \3c para color de borde, \4c para color de fondo de caja
-        # \4a&HB0& para transparencia del fondo (~30% opacidad)
-        # \bord2 para borde más delgado, \shad6 para sombra que actúa como fondo de caja
-        # BorderStyle=4 en el estilo crea una caja de fondo
-        ass_text = f"{{\\an5\\pos(540,900)\\3c&H000000&\\4c&H000000&\\4a&HB0&\\bord2\\shad6\\fad(200,200)}}{text}"
+        # Posicionado en la mitad superior, cerca de la línea divisoria (y=850, justo arriba de la línea en y=960)
+        # \an5 para anclaje central (centro)
+        # \pos(x,y) para posición absoluta
+        # \3c&H000000& para color de borde negro
+        # \4c&H000000& para color de fondo de caja
+        # \4a&H99& para transparencia del fondo (~40% opacidad, más visible)
+        # \bord4 para borde grueso (más visible)
+        # \shad0 para sin sombra
+        # \fad(200,200) para fade in/out suave
+        # Texto blanco (definido en el estilo) con borde negro
+        center_x = video_width // 2
+        pos_y = 850  # Posición vertical, justo arriba de la línea divisoria en y=960
+        ass_text = f"{{\\an5\\pos({center_x},{pos_y})\\3c&H000000&\\4c&H000000&\\4a&H99&\\bord4\\shad0\\fad(200,200)}}{text}"
         
         ass_events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{ass_text}")
     
@@ -440,11 +471,19 @@ def burn_subtitles_with_ffmpeg(video_path: Path, ass_path: Path, output_path: Pa
     """
     Quema los subtítulos ASS en el video usando FFmpeg.
     """
-    # Escapar rutas para Windows
-    video_str = str(video_path).replace('\\', '/')
-    ass_str = str(ass_path).replace('\\', '/')
-    output_str = str(output_path).replace('\\', '/')
+    # Verificar que los archivos existan
+    if not video_path.exists():
+        raise RuntimeError(f"Video no encontrado: {video_path}")
+    if not ass_path.exists():
+        raise RuntimeError(f"Archivo ASS no encontrado: {ass_path}")
     
+    # Usar rutas absolutas
+    video_str = str(video_path.resolve())
+    ass_str = str(ass_path.resolve())
+    output_str = str(output_path.resolve())
+    
+    # En Windows, las rutas pueden tener espacios, así que las escapamos correctamente
+    # Usar el filtro ass que es más directo
     cmd = [
         "ffmpeg",
         "-i", video_str,
@@ -457,11 +496,24 @@ def burn_subtitles_with_ffmpeg(video_path: Path, ass_path: Path, output_path: Pa
     ]
     
     try:
+        log(f"Quemando subtítulos: {ass_path.name}")
+        if DEBUG:
+            log(f"Comando FFmpeg: {' '.join(cmd)}")
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if result.stdout:
+            log(f"FFmpeg stdout: {result.stdout[:200]}")
         log(f"Subtítulos quemados exitosamente")
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr if isinstance(e.stderr, str) else e.stderr.decode('utf-8', errors='ignore')
-        raise RuntimeError(f"Error al quemar subtítulos con FFmpeg: {error_msg}")
+        log(f"[ERROR] FFmpeg stderr: {error_msg[:500]}")
+        # Mostrar el contenido del archivo ASS para debug
+        if DEBUG:
+            try:
+                ass_content = ass_path.read_text(encoding="utf-8")
+                log(f"[DEBUG] Contenido ASS (primeras 500 chars):\n{ass_content[:500]}")
+            except:
+                pass
+        raise RuntimeError(f"Error al quemar subtítulos con FFmpeg: {error_msg[:500]}")
     except FileNotFoundError:
         raise RuntimeError("FFmpeg no encontrado. Asegúrate de que FFmpeg esté instalado y en el PATH.")
 
@@ -491,7 +543,22 @@ def build_video_with_overlays(
 
     # Crop video a la mitad superior (0 a 960)
     video_cropped = video.crop(y1=0, y2=960).set_position((0, 0))
-    video_loop = video_cropped.fx(vfx.loop, duration=final_duration)
+    
+    # Asegurar que el video se repita hasta alcanzar final_duration
+    video_duration = video_cropped.duration
+    video_looped = None  # Para poder cerrarlo después si se crea
+    if video_duration < final_duration:
+        # Calcular cuántas veces necesitamos repetir el video
+        num_loops = int(final_duration / video_duration) + 1
+        # Crear lista de clips repetidos
+        video_clips = [video_cropped] * num_loops
+        # Concatenar todos los clips
+        video_looped = concatenate_videoclips(video_clips, method="compose")
+        # Recortar a la duración exacta
+        video_loop = video_looped.subclip(0, final_duration)
+    else:
+        # Si el video es más largo, simplemente recortarlo
+        video_loop = video_cropped.subclip(0, final_duration)
 
     # Crear fondo negro para la mitad inferior
     lower_bg = ImageClip(np.zeros((960, 1080, 3), dtype=np.uint8)) \
@@ -598,6 +665,9 @@ def build_video_with_overlays(
 
     final.close()
     video_loop.close()
+    if video_looped is not None:
+        video_looped.close()
+    video_cropped.close()
     video.close()
     voice.close()
     music_loop.close()
@@ -606,22 +676,41 @@ def build_video_with_overlays(
     # Si hay script_text, generar y quemar subtítulos
     if script_text:
         try:
+            log("Generando subtítulos...")
             srt_path = output_path.parent / f"{output_path.stem}.srt"
             ass_path = output_path.parent / f"{output_path.stem}.ass"
             
             generate_srt_from_script(script_text, final_duration, srt_path)
+            log(f"SRT generado: {srt_path.name}")
+            
             convert_srt_to_ass(srt_path, ass_path, font_path)
+            log(f"ASS generado: {ass_path.name}")
+            
+            if DEBUG:
+                # Mostrar una muestra del contenido ASS
+                try:
+                    ass_sample = ass_path.read_text(encoding="utf-8")[:500]
+                    log(f"[DEBUG] Muestra ASS:\n{ass_sample}")
+                except:
+                    pass
+            
             burn_subtitles_with_ffmpeg(temp_video_path, ass_path, output_path)
             
-            # Limpiar archivos temporales
-            if temp_video_path.exists():
-                temp_video_path.unlink()
-            if srt_path.exists():
-                srt_path.unlink()
-            if ass_path.exists():
-                ass_path.unlink()
+            # Limpiar archivos temporales (excepto en modo DEBUG)
+            if not DEBUG:
+                if temp_video_path.exists():
+                    temp_video_path.unlink()
+                if srt_path.exists():
+                    srt_path.unlink()
+                if ass_path.exists():
+                    ass_path.unlink()
+            else:
+                log(f"[DEBUG] Archivos temporales conservados: {srt_path}, {ass_path}")
         except Exception as e:
             log(f"[WARN] Error al generar subtítulos: {e}")
+            import traceback
+            if DEBUG:
+                log(f"[DEBUG] Traceback: {traceback.format_exc()}")
             # Si falla, usar el video sin subtítulos
             if temp_video_path.exists():
                 temp_video_path.rename(output_path)
